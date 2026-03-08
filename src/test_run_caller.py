@@ -10,8 +10,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import run_caller  # noqa: E402
-from run_caller import parse_raw_events, run_virema, standardize_predictions  # noqa: E402
+import run_virema  # noqa: E402
+from run_virema import parse_raw_events, run_virema, standardize_predictions  # noqa: E402
 
 
 def test_standardize_predictions_from_dummy_virema_output(tmp_path: Path) -> None:
@@ -117,7 +117,7 @@ def test_run_virema_uses_sam_filename_and_overwrite_flag(tmp_path: Path, monkeyp
             encoding="utf-8",
         )
 
-    monkeypatch.setattr(run_caller, "_run_command", fake_run_command)
+    monkeypatch.setattr(run_virema, "_run_command", fake_run_command)
 
     raw_output = run_virema(
         reference_fasta=reference_fasta,
@@ -125,7 +125,7 @@ def test_run_virema_uses_sam_filename_and_overwrite_flag(tmp_path: Path, monkeyp
         reads_r2=reads_r2,
         output_dir=output_dir,
         output_tag="pb2_sim",
-        virema_script=str(Path("src/ViReMa.py")),
+        virema_script=str(Path("src/ViReMa/ViReMa.py")),
         python_executable="python3",
     )
 

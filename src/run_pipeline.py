@@ -28,7 +28,7 @@ def run_step(name: str, cmd: list[str]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run full synthetic DelVG benchmark pipeline.")
 
-    parser.add_argument("--number-of-sequences", type=int, default=1000)
+    parser.add_argument("--number-of-sequences", type=int, default=100)
     parser.add_argument("--min-deletion-size", type=int, default=50)
     parser.add_argument("--max-deletion-size", type=int, default=500)
     parser.add_argument("--seed", type=int, default=17)
@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tolerance-window", type=int, default=5)
 
     parser.add_argument("--python-executable", type=str, default=sys.executable)
-    parser.add_argument("--virema-script", type=Path, default=Path("src/ViReMa.py"))
+    parser.add_argument("--virema-script", type=Path, default=Path("src/ViReMa/ViReMa.py"))
 
     return parser.parse_args()
 
@@ -87,7 +87,7 @@ def main() -> None:
 
     caller_cmd = [
         py,
-        "src/run_caller.py",
+        "src/run_virema.py",
         "--reference-fasta",
         "data/PB2.fasta",
         "--reads-r1",
@@ -103,6 +103,30 @@ def main() -> None:
         "--python-executable",
         py,
     ]
+
+    # caller_cmd = [
+    # py,
+    # "src/run_DItector.py",
+    # "--reference-fasta",
+    # "data/PB2.fasta",
+    # "--reads-r1",
+    # "output/reads_R1.fastq",
+    # "--reads-r2",
+    # "output/reads_R2.fastq",
+    # "--output-dir",
+    # "output/ditector",
+    # "--output-csv",
+    # "output/predicted_delvgs.csv",
+    # "--python-executable",
+    # py,
+    # "--output-tag",
+    # "pb2_sim",
+    # "--ditector-script",
+    # "src/DI-tector/DI-tector_06.py"
+    # ##### "--virema-script",
+    # ##### str(args.virema_script),  # optional legacy compatibility
+    # ]
+
 
     evaluate_cmd = [
         py,

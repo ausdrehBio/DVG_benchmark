@@ -1,9 +1,10 @@
-"""Run DVG caller and normalize raw output to predicted_delvgs.csv."""
+"""Run DVG caller DI-tector and normalize raw output to predicted_delvgs.csv."""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,9 @@ class PredictedDelVG:
     genome_id: str
     predicted_start: int
     predicted_end: int
+
+
+_BWA_INDEX_SUFFIXES = (".amb", ".ann", ".bwt", ".pac", ".sa")
 
 
 def _run_command(cmd: list[str]) -> None:
@@ -38,72 +42,121 @@ def _merge_fastq_files(reads_r1: Path, reads_r2: Path, merged_output: Path) -> N
                 out_handle.write(in_handle.read())
 
 
-def _candidate_virema_outputs(output_dir: Path, output_tag: str) -> list[Path]:
+def _candidate_ditector_outputs(output_dir: Path, output_tag: str) -> list[Path]:
     return [
-        output_dir / f"{output_tag}_Virus_Recombination_Results.csv",
-        output_dir / "Virus_Recombination_Results.csv",
-        output_dir / f"{output_tag}_Virus_Recombination_Results.txt",
-        output_dir / "Virus_Recombination_Results.txt",
-        output_dir / "BED_Files" / "Virus_Recombination_Results.BED",
-        output_dir / "BED_Files" / "Virus_Recombination_Results.BEDPE",
-        output_dir / "BED_Files" / "Virus_Recombination_Results.bed",
-        output_dir / "BED_Files" / "Virus_Recombination_Results.BEDPE",
-        output_dir / "Virus_Recombination_Results.BED",
-        output_dir / "Virus_Recombination_Results.BEDPE",
-        output_dir / f"{output_tag}_Virus_Recombination_Results.BED",
-        output_dir / f"{output_tag}_Virus_Recombination_Results.BEDPE",
-        output_dir / f"{output_tag}_recombinations.txt",
+        output_dir / f"{output_tag}_output_sorted.txt",
+        output_dir / f"{output_tag}_counts.txt",
+        output_dir / f"{output_tag}_output.txt",
     ]
 
 
-def run_virema(
+def _expected_bwa_index_files(reference_fasta: Path) -> list[Path]:
+    return [Path(f"{reference_fasta}{suffix}") for suffix in _BWA_INDEX_SUFFIXES]
+
+
+def _ensure_bwa_index(reference_fasta: Path, bwa_executable: str = "bwa") -> None:
+    """Ensure BWA index files exist for a reference FASTA, building them if needed."""
+
+    missing_before = [path for path in _expected_bwa_index_files(reference_fasta) if not path.exists()]
+    if not missing_before:
+        return
+
+    if shutil.which(bwa_executable) is None:
+        raise FileNotFoundError(
+            f"'{bwa_executable}' was not found on PATH and BWA index files are missing for {reference_fasta}."
+        )
+
+    _run_command([bwa_executable, "index", str(reference_fasta)])
+
+    missing_after = [path for path in _expected_bwa_index_files(reference_fasta) if not path.exists()]
+    if missing_after:
+        raise FileNotFoundError(
+            "BWA indexing was attempted but required index files are still missing. "
+            f"Missing: {[str(path) for path in missing_after]}"
+        )
+
+
+def _resolve_ditector_script(
+    ditector_script: str | None,
+    legacy_virema_script: str | None,
+    default_script: Path,
+) -> str:
+    """Prefer DI-tector script path while accepting legacy pipeline args."""
+
+    if ditector_script:
+        return ditector_script
+
+    if legacy_virema_script:
+        legacy_name = Path(legacy_virema_script).name.lower()
+        if "ditector" in legacy_name:
+            return legacy_virema_script
+
+    return str(default_script)
+
+
+def run_ditector(
     reference_fasta: Path,
     reads_r1: Path,
     reads_r2: Path,
     output_dir: Path,
     output_tag: str = "pb2_sim",
-    virema_script: str = "ViReMa.py",
+    ditector_script: str = "src/DI-tector/DI-tector_06.py",
     python_executable: str = "python3",
     microindel_length: int = 5,
     threads: int = 4,
     overwrite_output_dir: bool = True,
     keep_merged_fastq: bool = False,
+    host_reference: Path | None = None,
+    no_quantification: bool = False,
+    min_reads: int = 1,
     additional_args: list[str] | None = None,
 ) -> Path:
-    """Run ViReMa and return path to its raw recombination output file.
-
-    This wrapper merges paired-end FASTQ into one input file because ViReMa's
-    canonical CLI expects a single FASTA/FASTQ input stream.
-    """
+    """Run DI-tector and return path to its raw output file."""
 
     for path in (reference_fasta, reads_r1, reads_r2):
         if not path.exists():
             raise FileNotFoundError(f"Required input not found: {path}")
+    if host_reference is not None and not host_reference.exists():
+        raise FileNotFoundError(f"Host reference not found: {host_reference}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     merged_fastq = output_dir / f"{output_tag}.merged.fastq"
-    output_sam_name = f"{output_tag}.sam"
+
+    if not overwrite_output_dir:
+        existing_outputs = [path for path in _candidate_ditector_outputs(output_dir, output_tag) if path.exists()]
+        if existing_outputs:
+            raise FileExistsError(
+                "Output already exists and --no-overwrite was requested. "
+                f"Found: {[str(path) for path in existing_outputs]}"
+            )
+
+    _ensure_bwa_index(reference_fasta)
+    if host_reference is not None:
+        _ensure_bwa_index(host_reference)
 
     _merge_fastq_files(reads_r1, reads_r2, merged_fastq)
 
     cmd = [
         python_executable,
-        virema_script,
+        ditector_script,
         str(reference_fasta),
         str(merged_fastq),
-        output_sam_name,
-        "--Output_Dir",
+        "-o",
         str(output_dir),
-        "--Output_Tag",
+        "-t",
         output_tag,
-        "--MicroInDel_Length",
+        "-l",
         str(microindel_length),
-        "--p",
+        "-x",
         str(threads),
-        "-BED",
+        "-n",
+        str(min_reads),
     ]
-    if overwrite_output_dir:
-        cmd.append("-Overwrite")
+
+    if host_reference is not None:
+        cmd.extend(["-g", str(host_reference)])
+    if no_quantification:
+        cmd.append("-q")
 
     if additional_args:
         cmd.extend(additional_args)
@@ -114,14 +167,14 @@ def run_virema(
         if not keep_merged_fastq and merged_fastq.exists():
             merged_fastq.unlink()
 
-    candidates = _candidate_virema_outputs(output_dir, output_tag)
+    candidates = _candidate_ditector_outputs(output_dir, output_tag)
     for candidate in candidates:
         if candidate.exists():
             return candidate
 
     raise FileNotFoundError(
-        "ViReMa completed but no known raw output file was found. "
-        f"Checked: {[str(p) for p in candidates]}"
+        "DI-tector completed but no known raw output file was found. "
+        f"Checked: {[str(path) for path in candidates]}"
     )
 
 
@@ -133,20 +186,15 @@ def _to_int(value: str) -> int:
     return int(float(value))
 
 
-def _looks_like_header(row: list[str]) -> bool:
-    normalized = {_normalize_header(item) for item in row}
-    known_tokens = {
-        "reference_1",
-        "reference_2",
-        "reference",
-        "chrom1",
-        "chrom2",
-        "start",
-        "end",
-        "stop",
-        "count",
-    }
-    return bool(normalized.intersection(known_tokens))
+def _is_deletion_type(raw_type: str) -> bool:
+    return "deletion dvg" in raw_type.lower()
+
+
+def _extract_genome_id(value: str) -> str:
+    # DI-tector counts rows store references as "refA|refB".
+    if "|" in value:
+        return value.split("|", 1)[0].strip()
+    return value.strip()
 
 
 def _read_noncomment_rows(raw_events_path: Path) -> list[list[str]]:
@@ -161,73 +209,55 @@ def _read_noncomment_rows(raw_events_path: Path) -> list[list[str]]:
     return rows
 
 
+def _looks_like_header(row: list[str]) -> bool:
+    normalized = {_normalize_header(item) for item in row}
+    known_tokens = {
+        "dvg_s_type",
+        "dvg_type",
+        "bp_pos",
+        "ri_pos",
+        "rname_f",
+        "ref",
+        "reference",
+        "start",
+        "end",
+    }
+    return bool(normalized.intersection(known_tokens))
+
+
 def _parse_with_header(rows: list[list[str]]) -> list[PredictedDelVG]:
     headers = [_normalize_header(col) for col in rows[0]]
     data_rows = rows[1:]
-
     header_to_index = {name: idx for idx, name in enumerate(headers)}
 
+    type_col = next((c for c in ("dvg_s_type", "dvg_type", "type") if c in header_to_index), None)
     ref_col = next(
-        (c for c in ("reference_1", "reference", "chrom1", "chrom", "genome", "sequence") if c in header_to_index),
+        (c for c in ("rname_f", "reference_1", "reference", "chrom1", "chrom", "genome", "ref") if c in header_to_index),
         None,
     )
-    stop_col = next(
-        (
-            c
-            for c in (
-                "stop",
-                "stop_1",
-                "end1",
-                "breakpoint_start",
-                "bp_left",
-                "predicted_start",
-                "deletion_start",
-            )
-            if c in header_to_index
-        ),
-        None,
-    )
-    start_col = next(
-        (
-            c
-            for c in (
-                "start",
-                "end",
-                "start_2",
-                "start2",
-                "breakpoint_end",
-                "bp_right",
-                "predicted_end",
-                "deletion_end",
-            )
-            if c in header_to_index
-        ),
-        None,
-    )
+    left_col = next((c for c in ("bp_pos", "stop", "stop_1", "end1", "start", "predicted_start") if c in header_to_index), None)
+    right_col = next((c for c in ("ri_pos", "start_2", "start2", "end", "predicted_end") if c in header_to_index), None)
 
-    # BEDPE-style fallback with explicit column names.
-    if stop_col is None and start_col is None:
-        if {"end1", "start2"}.issubset(header_to_index):
-            stop_col = "end1"
-            start_col = "start2"
-    # ViReMa CSV fallback: Start/End/Reference
-    if stop_col is None and {"start", "end"}.issubset(header_to_index):
-        stop_col = "start"
-        start_col = "end"
-
-    if ref_col is None or stop_col is None or start_col is None:
+    if ref_col is None or left_col is None or right_col is None:
         raise ValueError(
             "Unsupported raw output header. "
-            "Need columns describing reference, left breakpoint, and right breakpoint."
+            "Need columns describing reference and two breakpoint positions."
         )
 
     predictions: list[PredictedDelVG] = []
     for row in data_rows:
         if len(row) < len(headers):
             continue
-        genome_id = row[header_to_index[ref_col]]
-        predicted_start = _to_int(row[header_to_index[stop_col]])
-        predicted_end = _to_int(row[header_to_index[start_col]])
+        if type_col is not None and not _is_deletion_type(row[header_to_index[type_col]]):
+            continue
+        try:
+            genome_id = _extract_genome_id(row[header_to_index[ref_col]])
+            predicted_start = _to_int(row[header_to_index[left_col]])
+            predicted_end = _to_int(row[header_to_index[right_col]])
+        except ValueError:
+            continue
+        if not genome_id:
+            continue
         predictions.append(PredictedDelVG(genome_id, predicted_start, predicted_end))
 
     return predictions
@@ -235,18 +265,52 @@ def _parse_with_header(rows: list[list[str]]) -> list[PredictedDelVG]:
 
 def _parse_without_header(rows: list[list[str]]) -> list[PredictedDelVG]:
     predictions: list[PredictedDelVG] = []
+
     for row in rows:
-        if len(row) >= 6:
-            # BEDPE-like: chrom1 start1 end1 chrom2 start2 end2 ...
-            genome_id = row[0]
-            predicted_start = _to_int(row[2])  # end1
-            predicted_end = _to_int(row[4])  # start2
+        if not row:
+            continue
+        raw_type = row[0].strip()
+        if not raw_type or raw_type.startswith("=") or raw_type.lower().startswith("none or reads") or raw_type.lower().startswith("no data"):
+            continue
+
+        # DI-tector detailed row from *_output_sorted.txt
+        if len(row) >= 18:
+            if not _is_deletion_type(raw_type):
+                continue
+            genome_id = row[8].strip() or row[9].strip()
+            try:
+                predicted_start = _to_int(row[2])
+                predicted_end = _to_int(row[3])
+            except ValueError:
+                continue
+            if not genome_id:
+                continue
             predictions.append(PredictedDelVG(genome_id, predicted_start, predicted_end))
-        elif len(row) >= 3:
-            # Generic fallback: genome/start/end
-            genome_id = row[0]
-            predicted_start = _to_int(row[1])
-            predicted_end = _to_int(row[2])
+            continue
+
+        # DI-tector aggregated row from *_counts.txt
+        if len(row) >= 8 and _is_deletion_type(raw_type):
+            try:
+                genome_id = _extract_genome_id(row[5])
+                predicted_start = _to_int(row[2])
+                predicted_end = _to_int(row[3])
+            except ValueError:
+                continue
+            if not genome_id:
+                continue
+            predictions.append(PredictedDelVG(genome_id, predicted_start, predicted_end))
+            continue
+
+        # Generic fallback for simple 3-column rows: genome/start/end
+        if len(row) == 3:
+            try:
+                genome_id = row[0].strip()
+                predicted_start = _to_int(row[1])
+                predicted_end = _to_int(row[2])
+            except ValueError:
+                continue
+            if not genome_id:
+                continue
             predictions.append(PredictedDelVG(genome_id, predicted_start, predicted_end))
 
     return predictions
@@ -316,8 +380,10 @@ def standardize_predictions(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run ViReMa and standardize predicted DelVG breakpoints.")
+    parser = argparse.ArgumentParser(description="Run DI-tector and standardize predicted DelVG breakpoints.")
     script_dir = Path(__file__).resolve().parent
+    default_ditector_script = script_dir / "DI-tector" / "DI-tector_06.py"
+
     parser.add_argument("--reference-fasta", type=Path, default=Path("data/PB2.fasta"))
     parser.add_argument("--reads-r1", type=Path, default=Path("output/reads_R1.fastq"))
     parser.add_argument("--reads-r2", type=Path, default=Path("output/reads_R2.fastq"))
@@ -327,14 +393,20 @@ def parse_args() -> argparse.Namespace:
         "--raw-events",
         type=Path,
         default=None,
-        help="Existing raw caller output to parse. If provided, ViReMa is not executed.",
+        help="Existing raw caller output to parse. If provided, DI-tector is not executed.",
     )
     parser.add_argument("--output-tag", type=str, default="pb2_sim")
     parser.add_argument(
+        "--ditector-script",
+        type=str,
+        default=None,
+        help=f"Path to DI-tector script (default: {default_ditector_script}).",
+    )
+    parser.add_argument(
         "--virema-script",
         type=str,
-        default=str(script_dir / "ViReMa.py"),
-        help="Path to ViReMa.py script (default: src/ViReMa.py).",
+        default=None,
+        help="Legacy argument accepted for pipeline compatibility. Prefer --ditector-script.",
     )
     parser.add_argument("--python-executable", type=str, default="python3")
     parser.add_argument("--microindel-length", type=int, default=5)
@@ -342,22 +414,44 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-overwrite",
         action="store_true",
-        help="Do not pass -Overwrite to ViReMa (ViReMa may append a timestamp to output directory).",
+        help="Fail if target DI-tector output files already exist.",
     )
     parser.add_argument("--min-deletion-size", type=int, default=1)
     parser.add_argument("--genome-filter", type=str, default=None)
     parser.add_argument(
         "--keep-merged-fastq",
         action="store_true",
-        help="Keep intermediate merged FASTQ used for ViReMa input.",
+        help="Keep intermediate merged FASTQ used for DI-tector input.",
     )
     parser.add_argument(
+        "--host-reference",
+        type=Path,
+        default=None,
+        help="Optional host reference FASTA for DI-tector -g/--Host_Ref.",
+    )
+    parser.add_argument(
+        "--no-quantification",
+        action="store_true",
+        help="Pass -q to DI-tector to disable percentage quantification.",
+    )
+    parser.add_argument(
+        "--min-reads",
+        type=int,
+        default=1,
+        help="Pass -n to DI-tector (minimum supporting reads per event).",
+    )
+    parser.add_argument(
+        "--additional-ditector-arg",
         "--additional-virema-arg",
+        dest="additional_ditector_arg",
         action="append",
         default=[],
-        help="Additional argument to append to ViReMa command (can be repeated).",
+        help="Additional argument to append to DI-tector command (can be repeated).",
     )
-    return parser.parse_args()
+
+    args = parser.parse_args()
+    args.ditector_script = _resolve_ditector_script(args.ditector_script, args.virema_script, default_ditector_script)
+    return args
 
 
 def main() -> None:
@@ -365,19 +459,22 @@ def main() -> None:
 
     raw_events_path = args.raw_events
     if raw_events_path is None:
-        raw_events_path = run_virema(
+        raw_events_path = run_ditector(
             reference_fasta=args.reference_fasta,
             reads_r1=args.reads_r1,
             reads_r2=args.reads_r2,
             output_dir=args.output_dir,
             output_tag=args.output_tag,
-            virema_script=args.virema_script,
+            ditector_script=args.ditector_script,
             python_executable=args.python_executable,
             microindel_length=args.microindel_length,
             threads=args.threads,
             overwrite_output_dir=not args.no_overwrite,
             keep_merged_fastq=args.keep_merged_fastq,
-            additional_args=args.additional_virema_arg,
+            host_reference=args.host_reference,
+            no_quantification=args.no_quantification,
+            min_reads=args.min_reads,
+            additional_args=args.additional_ditector_arg,
         )
 
     standardize_predictions(
