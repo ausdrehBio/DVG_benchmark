@@ -35,3 +35,17 @@ output/
 
 # Bowtie index artifacts generated from FASTA references
 *.ebwt
+
+# DVGfinder runtime outputs and archives
+src/DVGfinder/Outputs/
+src/DVGfinder/FinalReports/
+src/DVGfinder/OldOutputs/
+
+# DVGfinder staged references/indexes are runtime artifacts
+src/DVGfinder/ExternalNeeds/references/
+!src/DVGfinder/ExternalNeeds/references/.gitkeep
+
+# DVGfinder transient root-level artifacts
+src/DVGfinder/*_df_ML.csv
+src/DVGfinder/*_df_ML.tsv
+src/DVGfinder/*.log
